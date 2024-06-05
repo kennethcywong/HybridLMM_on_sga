@@ -1,0 +1,483 @@
+---
+title: "Building linear mixed effect models"
+author: "Kenneth Wong Chi Yin"
+date: "06/05/2024"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Model building
+```{r results='hide', warning=FALSE, message=FALSE}
+VERSION="paper20231025"
+BATCHID="CPH.20211217"
+suffix="rm_outliers.csv"
+DATAPATH=paste0("/home/kenneth/out/metabolic/", BATCHID, "/", VERSION, "/phenotype/")
+OUTPATH=paste0("/home/kenneth/out/metabolic/", BATCHID, "/", VERSION, "/phenotype/")
+
+windowSize=21
+
+# Read the Blood Test dataset 
+df.bt.final <- read.csv(paste0(DATAPATH, "metabolic_with_total_dose_", windowSize, "days.BL.", suffix))
+
+# Read the Body Check dataset
+df.bc.final <- read.csv(paste0(DATAPATH, "metabolic_with_total_dose_", windowSize, "days.BMI.", suffix))
+
+# Read the Blood Glucose Test dataset 
+df.bg.final <- read.csv(paste0(DATAPATH, "metabolic_with_total_dose_", windowSize, "days.BGF.", suffix))
+
+# Classification of drugs
+# Candidate SGAs for variable selection
+SGA_drugs <- c("CLOZAPINE","OLANZAPINE","ARIPIPRAZOLE","AMISULPRIDE","PALIPERIDONE","RISPERIDONE","QUETIAPINE", "ZIPRASIDONE", "LURASIDONE")
+
+# Candidate FGAs for variable selection
+FGA_drugs <- c("CHLORPROMAZINE","FLUPHENAZINE", "HALOPERIDOL", "PERPHENAZINE", "TRIFLUOPERAZINE", "PROCHLORPERAZINE", "PIMOZIDE")
+
+# Candidate metabolic and other drugs for variable selection
+meta_lipid_drugs <- c("METFORMIN", "ATORVASTATIN", "SIMVASTATIN")
+other_drugs <- c("VALPROATE", "LITHIUM", "CITALOPRAM", "SERTRALINE")
+
+# The metabolic measurement (i.e. the outcomes of LMM model)
+metabolic_params <- c("cholestrol", "LDL_Chol", "HDL_Chol", "Triglycerides", "BGF", "BMI")
+
+# Determine the 1st column index of drug dose.
+first_dose_idx <- match("bz_dose.CLOZAPINE", colnames(df.bt.final))
+drugs_with_dose <- colnames(df.bt.final)[first_dose_idx:ncol(df.bt.final)]
+
+
+```
+
+
+## Function to present the coefficient of LMM model in a pretty way.
+```{r echo = FALSE, warning=FALSE, message=FALSE}
+library(sjPlot)
+
+plot_lmm_model <- function(data, axis_label, title){
+  sjPlot::plot_model(data[[1]],
+                   axis.labels=axis_label,
+                   show.values=TRUE, show.p=TRUE,
+                   title=paste0(title, data[[2]]))
+}
+
+visualize_model <- function(models, model_names, label, title, tfm){
+
+  #data <- list()
+  #for(i in 1:length(model_names)){
+  #  data <- c(data, list(list(models[[i]], model_names[i])))
+  #}
+  #plot.out <- lapply(data, plot_lmm_model, label, title)
+  
+  pl <- c(
+    `(Intercept)` = "Intercept",
+    age = "Age",
+    Gender = "Sex (Female)",
+    education = "Year of Education",
+    Patient_TypeOP = "Out-Patient",
+    sga = "Take 2nd Gen. Drug (SGA)",
+    fga = "Take 1st Gen. Drug (FGA)",
+    sga_tablet_cnt = "SGA Daily tablet cnt",
+    fga_tablet_cnt = "FGA Daily table cnt",
+    tx_duration = "Tx Duration (months) ___________________",
+    btw_effect = "Btw-subj Drug effect",
+    within_effect = "Within-subj Drug effect",
+    bz_CLOZAPINE = "bz.CLOZAPINE",
+    bz_OLANZAPINE = "bz.OLANZAPINE",
+    bz_ARIPIPRAZOLE = "bz.ARIPIPRAZOLE",
+    bz_AMISULPRIDE = "bz.AMISULPRIDE",
+    bz_QUETIAPINE = "bz.QUETIAPINE",
+    bz_RISPERIDONE = "bz.RISPERIDONE",
+    bz_PALIPERIDONE = "bz.PALIPERIDONE",
+    bz_METFORMIN = "bz.METFORMIN",
+    bz_ATORVASTATIN = "bz.ATORVASTATIN",
+    bz_SIMVASTATIN = "bz.SIMVASTATIN",
+    bz_VALPROATE = "bz.VALPROATE",
+    bz_LITHIUM = "bz.LITHIUM",
+    bz_CITALOPRAM = "bz.CITALOPRAM",
+    bz_SERTRALINE = "bz.SERTRALINE ___________________",
+    bz_dose.SERTRALINE = "bz_dose.SERTRALINE ___________________",
+    wz_CLOZAPINE = "wz.CLOZAPINE",
+    wz_OLANZAPINE = "wz.OLANZAPINE",
+    wz_ARIPIPRAZOLE = "wz.ARIPIPRAZOLE",
+    wz_AMISULPRIDE = "wz.AMISULPRIDE",
+    wz_QUETIAPINE = "wz.QUETIAPINE",
+    wz_RISPERIDONE = "wz.RISPERIDONE",
+    wz_PALIPERIDONE = "wz.PALIPERIDONE",
+    wz_METFORMIN = "wz.METFORMIN",
+    wz_ATORVASTATIN = "wz.ATORVASTATIN",
+    wz_SIMVASTATIN = "wz.SIMVASTATIN",
+    wz_VALPROATE = "wz.VALPROATE",
+    wz_LITHIUM = "wz.LITHIUM",
+    wz_CITALOPRAM = "wz.CITALOPRAM",
+    wz_SERTRALINE = "wz.SERTRALINE",
+    a_non_used_label = "We don't care"
+  )
+  
+  #summary <- sjPlot::tab_model(models, pred.labels=pl, dv.labels=model_names, title=title,
+  #                             show.ci=FALSE, show.p=TRUE, show.r2=TRUE, transform=tfm,
+  #                             digits=4, digits.re=4)
+  summary <- sjPlot::tab_model(models, pred.labels=pl, dv.labels=model_names, title=title,
+                               show.stat=TRUE, show.se=TRUE, show.p=TRUE, show.r2=TRUE, transform=tfm,
+                               digits=4, digits.re=4)  
+  print(summary)
+  #return(plot.out)
+}
+```
+
+
+## Building Linear Mixed Model to estimate the Between- and Within- Subject effect of all
+## SGA drugs (ignore dosage, use binary 0/1 to indicate drug taken or not)
+```{r include=TRUE, warning=TRUE, message=TRUE}
+library(lme4)
+
+### Model for Cholestrol ###
+df.bt.final.tmp <- df.bt.final
+
+# Transform the metobolic level
+df.bt.final.tmp$log_cholestrol <- log(df.bt.final$cholestrol)
+
+TC_mixed_model_binary <- lmer(log_cholestrol~age+Gender+education+tx_duration+bz_CLOZAPINE+bz_OLANZAPINE+bz_ARIPIPRAZOLE+bz_AMISULPRIDE+bz_QUETIAPINE+bz_RISPERIDONE+bz_PALIPERIDONE+bz_METFORMIN+bz_ATORVASTATIN+bz_SIMVASTATIN+bz_VALPROATE+bz_LITHIUM+bz_CITALOPRAM+bz_SERTRALINE
+                         +wz_CLOZAPINE+wz_OLANZAPINE+wz_ARIPIPRAZOLE+wz_AMISULPRIDE+wz_QUETIAPINE+wz_RISPERIDONE+wz_PALIPERIDONE+wz_METFORMIN+wz_ATORVASTATIN+wz_SIMVASTATIN+wz_VALPROATE+wz_LITHIUM+wz_CITALOPRAM+wz_SERTRALINE
+                         +(1|ID), df.bt.final.tmp)
+summary(TC_mixed_model_binary)
+
+### Model for HDL_Chol ###
+df.bt.final.tmp$log_HDL_Chol <- log(df.bt.final$HDL_Chol)
+
+HDL_mixed_model_binary <- lmer(log_HDL_Chol~age+Gender+education+tx_duration+bz_CLOZAPINE+bz_OLANZAPINE+bz_ARIPIPRAZOLE+bz_AMISULPRIDE+bz_QUETIAPINE+bz_RISPERIDONE+bz_PALIPERIDONE+bz_METFORMIN+bz_ATORVASTATIN+bz_SIMVASTATIN+bz_VALPROATE+bz_LITHIUM+bz_CITALOPRAM+bz_SERTRALINE
+                         +wz_CLOZAPINE+wz_OLANZAPINE+wz_ARIPIPRAZOLE+wz_AMISULPRIDE+wz_QUETIAPINE+wz_RISPERIDONE+wz_PALIPERIDONE+wz_METFORMIN+wz_ATORVASTATIN+wz_SIMVASTATIN+wz_VALPROATE+wz_LITHIUM+wz_CITALOPRAM+wz_SERTRALINE
+                         +(1|ID), df.bt.final.tmp)
+summary(HDL_mixed_model_binary)
+
+### Model for LDL ###
+df.bt.final.tmp$log_LDL_Chol <- log(df.bt.final$LDL_Chol)
+
+LDL_mixed_model_binary <- lmer(log_LDL_Chol~age+Gender+education+tx_duration+bz_CLOZAPINE+bz_OLANZAPINE+bz_ARIPIPRAZOLE+bz_AMISULPRIDE+bz_QUETIAPINE+bz_RISPERIDONE+bz_PALIPERIDONE+bz_METFORMIN+bz_ATORVASTATIN+bz_SIMVASTATIN+bz_VALPROATE+bz_LITHIUM+bz_CITALOPRAM+bz_SERTRALINE
+                         +wz_CLOZAPINE+wz_OLANZAPINE+wz_ARIPIPRAZOLE+wz_AMISULPRIDE+wz_QUETIAPINE+wz_RISPERIDONE+wz_PALIPERIDONE+wz_METFORMIN+wz_ATORVASTATIN+wz_SIMVASTATIN+wz_VALPROATE+wz_LITHIUM+wz_CITALOPRAM+wz_SERTRALINE
+                         +(1|ID), df.bt.final.tmp)
+summary(LDL_mixed_model_binary)
+
+
+### Model for Triglycerides ###
+#df.bt.final.tmp$sqrt_Triglycerides <- (1/df.bt.final$Triglycerides)^(1/4)
+df.bt.final.tmp$log_Triglycerides <- log(df.bt.final$Triglycerides)
+
+TG_mixed_model_binary <- lmer(log_Triglycerides~age+Gender+education+tx_duration+bz_CLOZAPINE+bz_OLANZAPINE+bz_ARIPIPRAZOLE+bz_AMISULPRIDE+bz_QUETIAPINE+bz_RISPERIDONE+bz_PALIPERIDONE+bz_METFORMIN+bz_ATORVASTATIN+bz_SIMVASTATIN+bz_VALPROATE+bz_LITHIUM+bz_CITALOPRAM+bz_SERTRALINE
+                         +wz_CLOZAPINE+wz_OLANZAPINE+wz_ARIPIPRAZOLE+wz_AMISULPRIDE+wz_QUETIAPINE+wz_RISPERIDONE+wz_PALIPERIDONE+wz_METFORMIN+wz_ATORVASTATIN+wz_SIMVASTATIN+wz_VALPROATE+wz_LITHIUM+wz_CITALOPRAM+wz_SERTRALINE
+                         +(1|ID), df.bt.final.tmp)
+summary(TG_mixed_model_binary)
+
+
+### Model for BGF ###
+df.bg.final.tmp <- df.bg.final
+df.bg.final.tmp$log_BGF <- log(df.bg.final$BGF)
+
+BGF_mixed_model_binary <- lmer(log_BGF~age+Gender+education+tx_duration+bz_CLOZAPINE+bz_OLANZAPINE+bz_ARIPIPRAZOLE+bz_AMISULPRIDE+bz_QUETIAPINE+bz_RISPERIDONE+bz_PALIPERIDONE+bz_METFORMIN+bz_ATORVASTATIN+bz_SIMVASTATIN+bz_VALPROATE+bz_LITHIUM+bz_CITALOPRAM+bz_SERTRALINE
+                         +wz_CLOZAPINE+wz_OLANZAPINE+wz_ARIPIPRAZOLE+wz_AMISULPRIDE+wz_QUETIAPINE+wz_RISPERIDONE+wz_PALIPERIDONE+wz_METFORMIN+wz_ATORVASTATIN+wz_SIMVASTATIN+wz_VALPROATE+wz_LITHIUM+wz_CITALOPRAM+wz_SERTRALINE
+                         +(1|ID), df.bg.final.tmp)
+summary(BGF_mixed_model_binary)
+
+
+### Model for BMI ###
+df.bc.final.tmp <- df.bc.final
+df.bc.final.tmp$log_BMI <- log(df.bc.final$BMI)
+
+BMI_mixed_model_binary <- lmer(log_BMI~age+Gender+education+tx_duration+bz_CLOZAPINE+bz_OLANZAPINE+bz_ARIPIPRAZOLE+bz_AMISULPRIDE+bz_QUETIAPINE+bz_RISPERIDONE+bz_PALIPERIDONE+bz_METFORMIN+bz_ATORVASTATIN+bz_SIMVASTATIN+bz_VALPROATE+bz_LITHIUM+bz_CITALOPRAM+bz_SERTRALINE
+                         +wz_CLOZAPINE+wz_OLANZAPINE+wz_ARIPIPRAZOLE+wz_AMISULPRIDE+wz_QUETIAPINE+wz_RISPERIDONE+wz_PALIPERIDONE+wz_METFORMIN+wz_ATORVASTATIN+wz_SIMVASTATIN+wz_VALPROATE+wz_LITHIUM+wz_CITALOPRAM+wz_SERTRALINE
+                         +(1|ID), df.bc.final.tmp)
+summary(BMI_mixed_model_binary)
+
+#save(TC_mixed_model_binary, HDL_mixed_model_binary, LDL_mixed_model_binary, TG_mixed_model_binary, BGF_mixed_model_binary, BMI_mixed_model_binary, 
+#     file=file.path(paste0("/home/kenneth/out/metabolic/", BATCHID, "/", VERSION, "/MI/lmm.binary.raw.Rdata")))
+```
+
+## Building Linear Mixed Model to estimate the Between- and Within- Subject effect of all SGA drugs with dosage
+
+```{r include=TRUE, warning=TRUE, message=TRUE}
+library(lme4)
+
+### Model for Cholestrol ###
+df.bt.final.tmp <- df.bt.final
+
+# Transform the metobolic level
+df.bt.final.tmp$log_cholestrol <- log(df.bt.final$cholestrol)
+
+TC_mixed_model_dose <- lmer(log_cholestrol~age+Gender+education+tx_duration+bz_dose.CLOZAPINE+bz_dose.OLANZAPINE+bz_dose.ARIPIPRAZOLE+bz_dose.AMISULPRIDE+bz_dose.QUETIAPINE+bz_dose.RISPERIDONE+bz_dose.PALIPERIDONE+bz_dose.METFORMIN+bz_dose.ATORVASTATIN+bz_dose.SIMVASTATIN+bz_dose.VALPROATE+bz_dose.LITHIUM+bz_dose.CITALOPRAM+bz_dose.SERTRALINE
+                         +wz_dose.CLOZAPINE+wz_dose.OLANZAPINE+wz_dose.ARIPIPRAZOLE+wz_dose.AMISULPRIDE+wz_dose.QUETIAPINE+wz_dose.RISPERIDONE+wz_dose.PALIPERIDONE+wz_dose.METFORMIN+wz_dose.ATORVASTATIN+wz_dose.SIMVASTATIN+wz_dose.VALPROATE+wz_dose.LITHIUM+wz_dose.CITALOPRAM+wz_dose.SERTRALINE
+                         +(1|ID), df.bt.final.tmp)
+summary(TC_mixed_model_dose)
+
+
+### Model for HDL_Chol ###
+df.bt.final.tmp$log_HDL_Chol <- log(df.bt.final$HDL_Chol)
+
+HDL_mixed_model_dose <- lmer(log_HDL_Chol~age+Gender+education+tx_duration+bz_dose.CLOZAPINE+bz_dose.OLANZAPINE+bz_dose.ARIPIPRAZOLE+bz_dose.AMISULPRIDE+bz_dose.QUETIAPINE+bz_dose.RISPERIDONE+bz_dose.PALIPERIDONE+bz_dose.METFORMIN+bz_dose.ATORVASTATIN+bz_dose.SIMVASTATIN+bz_dose.VALPROATE+bz_dose.LITHIUM+bz_dose.CITALOPRAM+bz_dose.SERTRALINE
+                         +wz_dose.CLOZAPINE+wz_dose.OLANZAPINE+wz_dose.ARIPIPRAZOLE+wz_dose.AMISULPRIDE+wz_dose.QUETIAPINE+wz_dose.RISPERIDONE+wz_dose.PALIPERIDONE+wz_dose.METFORMIN+wz_dose.ATORVASTATIN+wz_dose.SIMVASTATIN+wz_dose.VALPROATE+wz_dose.LITHIUM+wz_dose.CITALOPRAM+wz_dose.SERTRALINE
+                         +(1|ID), df.bt.final.tmp)
+summary(HDL_mixed_model_dose)
+
+
+### Model for LDL ###
+df.bt.final.tmp$log_LDL_Chol <- log(df.bt.final$LDL_Chol)
+
+LDL_mixed_model_dose <- lmer(log_LDL_Chol~age+Gender+education+tx_duration+bz_dose.CLOZAPINE+bz_dose.OLANZAPINE+bz_dose.ARIPIPRAZOLE+bz_dose.AMISULPRIDE+bz_dose.QUETIAPINE+bz_dose.RISPERIDONE+bz_dose.PALIPERIDONE+bz_dose.METFORMIN+bz_dose.ATORVASTATIN+bz_dose.SIMVASTATIN+bz_dose.VALPROATE+bz_dose.LITHIUM+bz_dose.CITALOPRAM+bz_dose.SERTRALINE
+                        +wz_dose.CLOZAPINE+wz_dose.OLANZAPINE+wz_dose.ARIPIPRAZOLE+wz_dose.AMISULPRIDE+wz_dose.QUETIAPINE+wz_dose.RISPERIDONE+wz_dose.PALIPERIDONE+wz_dose.METFORMIN+wz_dose.ATORVASTATIN+wz_dose.SIMVASTATIN+wz_dose.VALPROATE+wz_dose.LITHIUM+wz_dose.CITALOPRAM+wz_dose.SERTRALINE
+                         +(1|ID), df.bt.final.tmp)
+summary(LDL_mixed_model_dose)
+
+
+### Model for Triglycerides ###
+df.bt.final.tmp$log_Triglycerides <- log(df.bt.final$Triglycerides)
+
+TG_mixed_model_dose <- lmer(log_Triglycerides~age+Gender+education+tx_duration+bz_dose.CLOZAPINE+bz_dose.OLANZAPINE+bz_dose.ARIPIPRAZOLE+bz_dose.AMISULPRIDE+bz_dose.QUETIAPINE+bz_dose.RISPERIDONE+bz_dose.PALIPERIDONE+bz_dose.METFORMIN+bz_dose.ATORVASTATIN+bz_dose.SIMVASTATIN+bz_dose.VALPROATE+bz_dose.LITHIUM+bz_dose.CITALOPRAM+bz_dose.SERTRALINE
+                        +wz_dose.CLOZAPINE+wz_dose.OLANZAPINE+wz_dose.ARIPIPRAZOLE+wz_dose.AMISULPRIDE+wz_dose.QUETIAPINE+wz_dose.RISPERIDONE+wz_dose.PALIPERIDONE+wz_dose.METFORMIN+wz_dose.ATORVASTATIN+wz_dose.SIMVASTATIN+wz_dose.VALPROATE+wz_dose.LITHIUM+wz_dose.CITALOPRAM+wz_dose.SERTRALINE
+                         +(1|ID), df.bt.final.tmp)
+summary(TG_mixed_model_dose)
+
+
+### Model for BGF ###
+df.bg.final.tmp <- df.bg.final
+df.bg.final.tmp$log_BGF <- log(df.bg.final$BGF)
+
+BGF_mixed_model_dose <- lmer(log_BGF~age+Gender+education+tx_duration+bz_dose.CLOZAPINE+bz_dose.OLANZAPINE+bz_dose.ARIPIPRAZOLE+bz_dose.AMISULPRIDE+bz_dose.QUETIAPINE+bz_dose.RISPERIDONE+bz_dose.PALIPERIDONE+bz_dose.METFORMIN+bz_dose.ATORVASTATIN+bz_dose.SIMVASTATIN+bz_dose.VALPROATE+bz_dose.LITHIUM+bz_dose.CITALOPRAM+bz_dose.SERTRALINE
+                         +wz_dose.CLOZAPINE+wz_dose.OLANZAPINE+wz_dose.ARIPIPRAZOLE+wz_dose.AMISULPRIDE+wz_dose.QUETIAPINE+wz_dose.RISPERIDONE+wz_dose.PALIPERIDONE+wz_dose.METFORMIN+wz_dose.ATORVASTATIN+wz_dose.SIMVASTATIN+wz_dose.VALPROATE+wz_dose.LITHIUM+wz_dose.CITALOPRAM+wz_dose.SERTRALINE
+                         +(1|ID), df.bg.final.tmp)
+summary(BGF_mixed_model_dose)
+
+
+### Model for BMI ###
+df.bc.final.tmp <- df.bc.final
+df.bc.final.tmp$log_BMI <- log(df.bc.final$BMI)
+
+BMI_mixed_model_dose <- lmer(log_BMI~age+Gender+education+tx_duration+bz_dose.CLOZAPINE+bz_dose.OLANZAPINE+bz_dose.ARIPIPRAZOLE+bz_dose.AMISULPRIDE+bz_dose.QUETIAPINE+bz_dose.RISPERIDONE+bz_dose.PALIPERIDONE+bz_dose.METFORMIN+bz_dose.ATORVASTATIN+bz_dose.SIMVASTATIN+bz_dose.VALPROATE+bz_dose.LITHIUM+bz_dose.CITALOPRAM+bz_dose.SERTRALINE
+                         +wz_dose.CLOZAPINE+wz_dose.OLANZAPINE+wz_dose.ARIPIPRAZOLE+wz_dose.AMISULPRIDE+wz_dose.QUETIAPINE+wz_dose.RISPERIDONE+wz_dose.PALIPERIDONE+wz_dose.METFORMIN+wz_dose.ATORVASTATIN+wz_dose.SIMVASTATIN+wz_dose.VALPROATE+wz_dose.LITHIUM+wz_dose.CITALOPRAM+wz_dose.SERTRALINE
+                         +(1|ID), df.bc.final.tmp)
+summary(BMI_mixed_model_dose)
+
+# Output the models to file
+#save(TC_mixed_model_dose, HDL_mixed_model_dose, LDL_mixed_model_dose, TG_mixed_model_dose, BGF_mixed_model_dose, BMI_mixed_model_dose, 
+#     file=file.path(paste0("/home/kenneth/out/metabolic/", BATCHID, "/", VERSION, "/MI/lmm.dose.raw.Rdata")))
+```
+
+
+## Print the result of LMM in a nice way
+```{r eval=FALSE, result='hide', warning=FALSE, message=FALSE, echo=FALSE}
+BATCHID="CPH.20211217"
+VERSION="paper20231025"
+
+# Output the Effect of CLOZAPINE on metabolic parameters
+m_type = c("binary_all_drugs", "dose_all_drugs", "SGA", "dose_OZP", "dose_CZP")
+m_names <- c("TC", "HDL", "LDL", "TG", "BG", "BMI")
+
+
+models <- list()
+# All drugs model with binary dosage (0/1)
+models[[ m_type[1] ]] <- list(TC_mixed_model_binary, HDL_mixed_model_binary, LDL_mixed_model_binary, TG_mixed_model_binary, BGF_mixed_model_binary, BMI_mixed_model_binary)
+# All drugs model with dosage
+models[[ m_type[2] ]] <- list(TC_mixed_model_dose, HDL_mixed_model_dose, LDL_mixed_model_dose, TG_mixed_model_dose, BGF_mixed_model_dose, BMI_mixed_model_dose)
+
+# Define the reverse transform function for the model coefficients
+exp2percentInc <- function(x) { (exp(x) - 1)*100 }
+
+title <- list("Association of SGA on TC, HDL, LDL, TG, BG and BMI",
+              "Effect size of SGA dose on TC, HDL, LDL, TG, BG and BMI")
+
+# Generate the summary statistic of the model coefficients
+for (i in 1:length(models)) {
+  m <- models[[m_type[i]]]
+  visualize_model(m, m_names, axis_label, title[i], "exp2percentInc")
+}
+
+
+```
+
+```{r}
+# Histogram of log(outcome) and residual plot of LMM
+library(car)
+library(dplyr)
+
+OUTPATH="/home/kenneth/out/metabolic/CPH.20211217/paper20231025/figures/"
+
+png(paste0(OUTPATH, "outcome_qqplot.png"), width=480, height=680)
+op <- par(mfrow = c(4, 3), mar=c(4, 4, 6, 1.5))
+qqnorm(df.bt.final$cholestrol, main="TC")
+qqline(df.bt.final$cholestrol)
+qqnorm(df.bt.final$HDL_Chol, main="HDL")
+qqline(df.bt.final$HDL_Chol)
+qqnorm(df.bt.final$LDL_Chol, main="LDL")
+qqline(df.bt.final$LDL_Chol)
+qqnorm(log(df.bt.final$cholestrol), main="log(TC)")
+qqline(log(df.bt.final$cholestrol))
+qqnorm(log(df.bt.final$HDL_Chol), main="log(HDL)")
+qqline(log(df.bt.final$HDL_Chol))
+qqnorm(log(df.bt.final$LDL_Chol), main="log(LDL)")
+qqline(log(df.bt.final$LDL_Chol))
+
+qqnorm(df.bt.final$Triglycerides, main="TG")
+qqline(df.bt.final$Triglycerides)
+qqnorm(df.bg.final$BGF, main="BG")
+qqline(df.bg.final$BGF)
+qqnorm(df.bc.final$BMI, main="BMI")
+qqline(df.bc.final$BMI)
+qqnorm(log(df.bt.final$Triglycerides), main="log(TG)")
+qqline(log(df.bt.final$Triglycerides))
+qqnorm(log(df.bg.final$BGF), main="log(BG)")
+qqline(log(df.bg.final$BGF))
+qqnorm(log(df.bc.final$BMI), main="log(BMI)")
+qqline(log(df.bc.final$BMI))
+main_title <- "Normal quantile plot for metabolic measures before and after log transformation"
+mtext(main_title, side=3, outer = T, line=-2, font = 0.8, cex = 1.0)
+
+# par(mfrow = c(2, 3))
+par(op)
+dev.off()
+
+
+# QQ-Plot of Residuals in LMM models
+#m <- models[[m_type[1]]]
+m <- models[[m_type[2]]]
+#png(paste0(OUTPATH, "residual_qqplot_modelA.png"), width=960, height=640)
+png(paste0(OUTPATH, "residual_qqplot_modelB.png"), width=960, height=640)
+op <- par(mfrow = c(2, 3), mar=c(4, 4, 7, 1.5))
+for(i in 1:length(m)){
+  r <- scale(residuals(m[[i]]))
+  qqnorm(r, main=m_names[i], ylab="Standardized residuals")
+  qqline(r)
+}
+#main_title <- "Normal quantile plot for standardized residual (Model A)"
+main_title <- "Normal quantile plot for standardized residual (Model B)"
+mtext(main_title, side=3, outer = T, line=-2, font = 0.8, cex = 1.2)
+par(op)
+dev.off()
+
+# Residual vs fitted value plots of LMM model
+#m <- models[[m_type[1]]]
+m <- models[[m_type[2]]]
+#model_name <- "Model A"
+model_name <- "Model B"
+
+for(i in 1:length(m)){
+  lmm <- m[[i]]
+  #scatterplot(sqrt(abs(residuals(lmm))) ~ fitted(lmm),
+  scatterplot(residuals(lmm) ~ fitted(lmm),
+            xlab=paste0("Estimated ", m_names[i]) , 
+            ylab=paste0("Residual of ", model_name, " (", m_names[i], ")"))
+}
+
+# Correlation plot
+#install.packages("ggcorrplot")
+library(ggcorrplot)
+library(psych)
+
+# Between-subject (Model A), remove the subject with education = NA
+df.tmp <- subset(df.bc.final[!is.na(df.tmp$education),], select=c(age, Gender, education, tx_duration, bz_CLOZAPINE, bz_OLANZAPINE, bz_ARIPIPRAZOLE, bz_AMISULPRIDE, bz_QUETIAPINE, bz_RISPERIDONE, bz_PALIPERIDONE, bz_METFORMIN, bz_ATORVASTATIN, bz_SIMVASTATIN, bz_VALPROATE, bz_LITHIUM, bz_CITALOPRAM))
+
+cor_matrix <- cor(df.tmp)
+p.mat <- corr.test(df.tmp)$p
+ggcorrplot(cor_matrix, method="square", type="upper", p.mat=p.mat, tl.cex=8, tl.srt=45,
+           title="Correlation plot for between-subject covariates (Model A)")
+ggsave(file=paste0(OUTPATH, "corrplot_bz_modelA.png"), device="png")
+
+# Within-subject (Model A), remove the subject with education = NA
+df.tmp <- subset(df.bc.final[!is.na(df.tmp$education),], select=c(age, Gender, education, tx_duration, wz_CLOZAPINE, wz_OLANZAPINE, wz_ARIPIPRAZOLE, wz_AMISULPRIDE, wz_QUETIAPINE, wz_RISPERIDONE, wz_PALIPERIDONE, wz_METFORMIN, wz_ATORVASTATIN, wz_SIMVASTATIN, wz_VALPROATE, wz_LITHIUM, wz_CITALOPRAM))
+
+
+cor_matrix <- cor(df.tmp)
+p.mat <- corr.test(df.tmp)$p
+ggcorrplot(cor_matrix, method="square", type="upper", p.mat=p.mat, tl.cex=8, tl.srt=45,
+           title="Correlation plot for within-subject covariates (Model A)")
+ggsave(file=paste0(OUTPATH, "corrplot_wz_modelA.png"), device="png")
+
+
+# Between-subject (Model B), remove the subject with education = NA
+df.tmp <- subset(df.bc.final[!is.na(df.tmp$education),], select=c(age, Gender, education, tx_duration, bz_dose.CLOZAPINE, bz_dose.OLANZAPINE, bz_dose.ARIPIPRAZOLE, bz_dose.AMISULPRIDE, bz_dose.QUETIAPINE, bz_dose.RISPERIDONE, bz_dose.PALIPERIDONE, bz_dose.METFORMIN, bz_dose.ATORVASTATIN, bz_dose.SIMVASTATIN, bz_dose.VALPROATE, bz_dose.LITHIUM, bz_dose.CITALOPRAM))
+
+cor_matrix <- cor(df.tmp)
+p.mat <- corr.test(df.tmp)$p
+ggcorrplot(cor_matrix, method="square", type="upper", p.mat=p.mat, tl.cex=8, tl.srt=45,
+           title="Correlation plot for between-subject covariates (Model B) ")
+ggsave(file=paste0(OUTPATH, "corrplot_bz_modelB.png"), device="png")
+
+# Within-subject (Model B), remove the subject with education = NA
+df.tmp <- subset(df.bc.final[!is.na(df.tmp$education),], select=c(age, Gender, education, tx_duration, wz_dose.CLOZAPINE, wz_dose.OLANZAPINE, wz_dose.ARIPIPRAZOLE, wz_dose.AMISULPRIDE, wz_dose.QUETIAPINE, wz_dose.RISPERIDONE, wz_dose.PALIPERIDONE, wz_dose.METFORMIN, wz_dose.ATORVASTATIN, wz_dose.SIMVASTATIN, wz_dose.VALPROATE, wz_dose.LITHIUM, wz_dose.CITALOPRAM))
+
+cor_matrix <- cor(df.tmp)
+p.mat <- corr.test(df.tmp)$p
+ggcorrplot(cor_matrix, method="square", type="upper", p.mat=p.mat, tl.cex=8, tl.srt=45,
+           title="Correlation plot for within-subject covariates (Model B) ")
+ggsave(file=paste0(OUTPATH, "corrplot_wz_modelB.png"), device="png")
+
+
+```
+
+```{r include=TRUE, warning=TRUE, message=TRUE}
+### Building Linear Mixed Model for stratified analysis of SGA drugs
+
+library(lme4)
+
+
+# Define the reverse transform function for the model coefficients
+exp2percentInc <- function(x) { (exp(x) - 1)*100 }
+
+# Generate the summary statistic of the model coefficients
+axis_label <- c("Take 1st Gen Drug(FGA)", "Tx duration(mths)", "Take 2nd Gen Drug(SGA)", "Education", "Sex(Female)", "Age")
+
+### Model for Cholestrol ###
+df.bt.final.tmp <- df.bt.final
+
+# Transform the metobolic level
+df.bt.final.tmp$log_cholestrol <- log(df.bt.final$cholestrol)
+
+## OLANZAPINE (Threshold = 5mg)
+t <- 'TC'
+drug <- 'OLANZAPINE'
+df.startup <- df.bt.final.tmp[df.bt.final.tmp$dose.OLANZAPINE <= 5.0,]
+df.ongoing <- df.bt.final.tmp[df.bt.final.tmp$dose.OLANZAPINE >= 5.0,]
+
+# LMM model for startup (0 - 5mg)
+TC_mixed_model_dose.startup <- lmer(log_cholestrol~age+Gender+education+tx_duration+dose.HALOPERIDOL+dose.TRIFLUOPERAZINE+dose.CLOZAPINE+dose.OLANZAPINE+dose.ARIPIPRAZOLE+dose.AMISULPRIDE+dose.QUETIAPINE+dose.RISPERIDONE+dose.PALIPERIDONE+dose.METFORMIN+dose.ATORVASTATIN+dose.SIMVASTATIN+dose.VALPROATE+dose.LITHIUM+dose.CITALOPRAM+dose.SERTRALINE
+                         +(1+dose.OLANZAPINE|ID), df.startup)
+#summary(TC_mixed_model_dose.startup)
+
+# LMM model for ongoing (>5mg)
+TC_mixed_model_dose.ongoing <- lmer(log_cholestrol~age+Gender+education+tx_duration+dose.HALOPERIDOL+dose.TRIFLUOPERAZINE+dose.CLOZAPINE+dose.OLANZAPINE+dose.ARIPIPRAZOLE+dose.AMISULPRIDE+dose.QUETIAPINE+dose.RISPERIDONE+dose.PALIPERIDONE+dose.METFORMIN+dose.ATORVASTATIN+dose.SIMVASTATIN+dose.VALPROATE+dose.LITHIUM+dose.CITALOPRAM+dose.SERTRALINE
+                         +(1+dose.OLANZAPINE|ID), df.ongoing)
+#summary(TC_mixed_model_dose.ongoing)
+
+models <- list(TC_mixed_model_dose.startup, TC_mixed_model_dose.ongoing)
+title <- paste0('Percentage change of ', t, ' per mg of ', drug, ' taken')
+model_names <- c('0 to 5mg', '5mg to 30mg')
+visualize_model(models, model_names, axis_label, title, "exp2percentInc")
+
+
+
+## METFORMIN (Threshold = 250mg)
+t <- 'TC'
+drug <- 'METFORMIN'
+df.startup <- df.bt.final.tmp[df.bt.final.tmp$dose.METFORMIN <= 1500,]
+df.ongoing <- df.bt.final.tmp[df.bt.final.tmp$dose.METFORMIN >= 1500,]
+
+# LMM model for startup (0 - 1500mg)
+TC_mixed_model_dose.startup <- lmer(log_cholestrol~age+Gender+education+tx_duration+dose.HALOPERIDOL+dose.TRIFLUOPERAZINE+dose.CLOZAPINE+dose.OLANZAPINE+dose.ARIPIPRAZOLE+dose.AMISULPRIDE+dose.QUETIAPINE+dose.RISPERIDONE+dose.PALIPERIDONE+dose.METFORMIN+dose.ATORVASTATIN+dose.SIMVASTATIN+dose.VALPROATE+dose.LITHIUM+dose.CITALOPRAM+dose.SERTRALINE
+                         +(1+dose.METFORMIN|ID), df.startup)
+#summary(TC_mixed_model_dose.startup)
+
+# LMM model for ongoing (> 1500mg)
+TC_mixed_model_dose.ongoing <- lmer(log_cholestrol~age+Gender+education+tx_duration+dose.HALOPERIDOL+dose.TRIFLUOPERAZINE+dose.CLOZAPINE+dose.OLANZAPINE+dose.ARIPIPRAZOLE+dose.AMISULPRIDE+dose.QUETIAPINE+dose.RISPERIDONE+dose.PALIPERIDONE+dose.METFORMIN+dose.ATORVASTATIN+dose.SIMVASTATIN+dose.VALPROATE+dose.LITHIUM+dose.CITALOPRAM+dose.SERTRALINE
+                         +(1+dose.METFORMIN|ID), df.ongoing)
+
+#summary(TC_mixed_model_dose.ongoing)
+models <- list(TC_mixed_model_dose.startup, TC_mixed_model_dose.ongoing)
+title <- paste0('Percentage change of ', t, ' per mg of ', drug, ' taken')
+model_names <- c('0 to 1500mg', '1500mg to 3000mg')
+visualize_model(models, model_names, axis_label, title, "exp2percentInc")
+
+
+
+```
+
+

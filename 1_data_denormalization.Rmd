@@ -1,0 +1,422 @@
+---
+title: Clean and preprocess the raw data to a dataset suitable for linear mixed modelling.
+author: "Kenneth Wong Chi Yin"
+date: "06/05/2024
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+### Read the raw dataset
+```{r, results='hide'}
+VERSION="paper20231025"
+BATCHID="CPH.20211217"
+DATAPATH=paste0("/home/kenneth/data/metabolic/ver20220920/")
+OUTPATH=paste0("/home/kenneth/out/metabolic/", BATCHID, "/", VERSION, "/phenotype/")
+
+# Read input dataset
+df.dose <- read.csv(paste0(DATAPATH, "medication_dose_calculated.csv"))
+df.clinic <- read.csv(paste0(DATAPATH, "metabolic_cleaned.csv"))
+
+# Remove invalid records
+rm_idx <- c()
+df.clinic <- df.clinic[df.clinic$ID!=487,]  # Gender= "\"
+idx <- which(df.clinic$ID==584&df.clinic$BL_Date=="19/8/2019"&is.na(df.clinic$LDL_Chol))
+rm_idx <- c(rm_idx, idx)
+idx <- which(df.clinic$ID==274&df.clinic$Date=="1/12/2010"&df.clinic$baseline==0)
+rm_idx <- c(rm_idx, idx)
+idx <- which(df.clinic$ID==419&df.clinic$Date=="22/12/2011")[1]
+rm_idx <- c(rm_idx, idx)
+idx <- which(df.clinic$ID==545&df.clinic$Date=="1/8/2011")[1]
+rm_idx <- c(rm_idx, idx)
+idx <- which(df.clinic$ID==701&df.clinic$Date=="29/2/2016")[1]
+rm_idx <- c(rm_idx, idx)
+df.clinic <- df.clinic[-rm_idx,]
+
+# Convert education from character to integer
+df.clinic$education <- as.integer(df.clinic$education)
+
+# Classification of drugs
+# Candidate SGA drugs for variable selection
+SGA_drugs <- c("CLOZAPINE","OLANZAPINE","ARIPIPRAZOLE","AMISULPRIDE","PALIPERIDONE","RISPERIDONE","QUETIAPINE", "ZIPRASIDONE", "LURASIDONE")
+
+# Candidate FGA drugs for variable selection
+FGA_drugs <- c("CHLORPROMAZINE","FLUPHENAZINE", "HALOPERIDOL", "PERPHENAZINE", "TRIFLUOPERAZINE", "PROCHLORPERAZINE", "PIMOZIDE")
+
+# Candidate metabolic drugs for variable selection
+meta_drugs <- c("METFORMIN","GLICLAZIDE","ATORVASTATIN", "SIMVASTATIN", "PIOGLITAZONE", "VALPROATE", "LITHIUM", "FLUOXETINE", "CITALOPRAM", "SERTRALINE", "FLUPENTHIXOL")
+
+injectable_sga <- c("OLANZAPINE", "RISPERIDONE", "ARIPIPRAZOLE", "PALIPERIDONE")
+
+ALL_drugs <- c(SGA_drugs, FGA_drugs, meta_drugs)
+
+# Set the FGA indicator
+df.dose$fga <- rep(0, nrow(df.dose))
+df.dose[df.dose$drug_str1 %in% FGA_drugs, ncol(df.dose)] <- 1
+
+```
+
+### Extract the metabolic and clinical data of all subjects from dataset with medication prescription.
+```{r, results='hide'}
+library(lubridate)
+
+# Calculate the duration of treatment (in months, baseline = 0)
+calc_tx_duration <- function(i, df){
+  df.tmp <- df[df$ID==i,]
+  n <- nrow(df.tmp)
+  if(n > 1) {
+    out <- rep(0, n)
+    for (j in 2:n) {
+      out[j] <- (interval(ymd(df.tmp[1,c("Test_Date")]), ymd(df.tmp[j, c("Test_Date")]))
+                 / days(30))
+    }
+    return(out)
+  } else { # patient with only one measurement record
+    return(c(0))
+  }
+}
+
+
+# Define the response (y) and covariates (x)
+x <- c("ID", "Gender", "DOB", "Onset_Age", "education", "Date", "BL_Date", "BGF_Date")
+y <- c("BMI", "BGF", "cholestrol", "LDL_Chol", "HDL_Chol", "Triglycerides")
+
+tt <- c("BL", "BGF", "BMI")
+clinics <- list()
+
+# Extract records with non-NA metabolic data
+clinics[[ tt[1] ]] <- subset(df.clinic, !is.na(BL_Date))
+clinics[[ tt[2] ]] <- subset(df.clinic, !is.na(BGF_Date))
+clinics[[ tt[3] ]] <- subset(df.clinic, !is.na(Date))
+clinics[[ tt[3] ]] <- subset(clinics[[ tt[3] ]], !is.na(BMI))
+
+# Extract columns with subject's clinical and metabolic data
+clinics[[ tt[1] ]] <- subset(clinics[[ tt[1] ]], select=c(x[-c(6,8)], y[-c(1:2)]))
+clinics[[ tt[2] ]] <- subset(clinics[[ tt[2] ]], select=c(x[-c(6,7)], y[2]))
+clinics[[ tt[3] ]] <- subset(clinics[[ tt[3] ]], select=c(x[-c(7:8)], y[1]))
+
+for (t in tt){
+  colnames(clinics[[t]])[6] <- "Test_Date"
+
+  # Convert to Date
+  clinics[[t]]$Test_Date <- as.Date(clinics[[t]]$Test_Date, "%d/%m/%Y")
+  clinics[[t]]$DOB <- as.Date(clinics[[t]]$DOB, "%d/%m/%Y")
+
+  # Calculate age at measurement
+  clinics[[t]]$age <- interval(clinics[[t]]$DOB,
+                                    clinics[[t]]$Test_Date)/days(365)
+
+  # Sorted by ID and Test_Date
+  clinics[[t]] <- clinics[[t]][with(clinics[[t]], order(ID, Test_Date)),]
+
+  # Calculate the treatment duration for blood test data set
+  ids <- unique(clinics[[t]]$ID)
+  tx_duration <- sapply(ids, calc_tx_duration, clinics[[t]])
+  clinics[[t]]$tx_duration <- unlist(tx_duration)
+
+  # De-duplicate the df.clinic.bt and df.clinic.bc
+  clinics[[t]] <- unique(clinics[[t]])
+}
+```
+
+
+### Define a function to extract drug prescribed n (=windowSize) days before the metabolic level measurements.
+```{r, results='hide'}
+library(zoo)
+
+# Functions definition
+
+Modes <- function(x) {
+  ux <- unique(x)
+  tab <- tabulate(match(x, ux))
+  ux[tab == max(tab)]
+}
+
+extractDose <- function(id, windowSize, df.clinic, df.dosage, drugNames) {
+  df <- subset(df.dosage, ID==id)
+  df.clinic.1 <- df.clinic[df.clinic$ID==id,]
+  testdate <- df.clinic.1[, c("Test_Date")]
+  
+  df$startdate <- as.Date(df$startdate, "%m/%d/%Y")
+  df$enddate <- as.Date(df$enddate, "%m/%d/%Y")
+
+  n <- length(testdate)
+  n.drugs <- length(drugNames)
+  sga <- rep(0, n)
+  fga <- rep(0, n)
+  sga_tablet_cnt <- rep(0, n)
+  fga_tablet_cnt <- rep(0, n)
+  patient_type <- rep(NA, n)
+  df.drugs <- data.frame(matrix(ncol=n.drugs, nrow=0))
+  for(i in 1:n){
+
+    # Find those drug dispense records with start_date earlier than test date by windowSize
+    drugStartDate <- testdate[i] - days(windowSize)
+    df.tmp <- df[drugStartDate %within% interval(df$startdate, df$enddate),]
+
+    # Filter away the optional drugs
+    df.tmp <- df.tmp[!is.na(df.tmp$total_dose),]
+
+    # Skip to next iteration if no dispense records are found during the specific period
+    if(nrow(df.tmp) == 0) {
+      drugs.row <- rep(0, n.drugs)
+      df.drugs <- rbind(df.drugs, drugs.row)
+      next
+    }
+    
+    # Construct a dataframe for drug details
+    drugsTaken <- unique(df.tmp$drug_str1)
+    drugs.idx <- which(drugNames %in% drugsTaken)
+    drugs.row <- rep(0, n.drugs)
+    drugs.row[drugs.idx] <- 1
+    df.drugs <- rbind(df.drugs, drugs.row)
+
+    # Calculate the total daily dosage for SGA and FGA drug in the unit of tablet
+    df.tmp$tablet_cnt <- df.tmp$total_dose/df.tmp$drug_mg
+    df.tmp <- df.tmp[,c("ID", "Patient.Type", "drug_str1", "sga", "fga", "tablet_cnt")]
+    
+    df.min_cnt <- aggregate(tablet_cnt ~ drug_str1, data=df.tmp, min)
+    df.tmp <- merge(df.tmp, df.min_cnt, by="drug_str1", all.x=TRUE)[,-6]
+    df.tmp <- unique(df.tmp)
+    colnames(df.tmp)[6] <- "tablet_cnt"
+    sga_cnts <- aggregate(tablet_cnt ~ sga, data=df.tmp, sum)
+    fga_cnts <- aggregate(tablet_cnt ~ fga, data=df.tmp, sum)
+
+    # Extract the patient type (in/out patient)
+    patient_type[i] <- df.tmp$Patient.Type[1]
+    if(sum(sga_cnts$sga) > 0) {
+      sga[i] <- 1
+      sga_tablet_cnt[i] <- sga_cnts[sga_cnts$sga==1, c("tablet_cnt")]
+      
+    }
+    # Extract the FGA count
+    if(sum(fga_cnts$fga) > 0) {
+      fga[i] <- 1
+      fga_tablet_cnt[i] <- fga_cnts[fga_cnts$fga==1, c("tablet_cnt")]
+    }
+  } # End of for-loop
+  
+  # Fill the NA value of Patient Type by the Mode in the vector
+  fill.val <- Modes(patient_type)
+  patient_type <- na.fill(patient_type, fill.val)
+  
+  # Merge the extracted dosage with the input clinical data frame
+  df.dose.1 <- data.frame(id, testdate, patient_type, 
+                          sga, fga, sga_tablet_cnt, fga_tablet_cnt)
+  colnames(df.dose.1)[1:3] <- c("ID", "Test_Date", "Patient_Type")
+  df.out <- merge(df.clinic.1, df.dose.1, by=c("ID", "Test_Date"), all.x=TRUE)
+
+  # Combine the clinic and drug info dataframe
+  colnames(df.drugs) <- drugNames
+  df.out <- cbind(df.out, df.drugs)
+
+  return(df.out)
+}
+
+
+```
+
+
+#*********************************
+# Disaggregation of the between-subject and within-subject effects
+# newer method: ie calculating regression intercept and residuals from 
+# the mean in each subject
+#**********************************
+
+```{r}
+# Estimate the intercept and residual of linear regression model for between-subject and
+# within-subject component respectively
+calc_covar_intercept_residuals <- function(outcome, covar, df){
+  ids <- unique(df$ID)
+  n <- nrow(df)
+  
+  intercept <- rep(NA, n)
+  residual <- rep(NA, n)
+  for(i in 1:length(ids)){
+    ind <- which(df$ID %in% ids[i])
+    df.tmp <- subset(df, select=c(outcome, covar))
+    df.tmp <- df.tmp[ind,]
+    
+    if(nrow(df.tmp) >= 3){
+      n_unique <- length(unique(df.tmp[[outcome]]))
+      if(n_unique >= 2){
+        model <- lm(as.formula(paste0(outcome, "~", covar)), df.tmp)
+        intercept[ind] <- summary(model)$coef[1,1]
+        residual[ind] <- model$residual
+      }
+    }
+    if(sum(is.na(intercept[ind])) > 0){
+      outcome_mean <- mean(df.tmp[[outcome]])
+      intercept[ind] <- outcome_mean
+      residual[ind] <- df.tmp[[outcome]] - outcome_mean
+    }
+  }
+  return(list(intercept, residual))
+}
+
+# Return a dataframe with the between-subject and within-subject components of a 
+# independent variables in the LMM model
+add_bz_wz_cols <- function(drugs, t_covariates, df) {
+  results <- lapply(drugs, calc_covar_intercept_residuals, t_covariates, df)
+  df.out <- df
+  for(i in 1:length(drugs)){
+    bz_wz <- results[[i]]
+    df.out <- cbind(df.out, bz_wz[[1]], bz_wz[[2]])
+    
+    n_col <- ncol(df.out)
+    colnames(df.out)[n_col-1] <- paste0("bz_", drugs[i])
+    colnames(df.out)[n_col] <- paste0("wz_", drugs[i])
+  }
+  return(df.out)
+}
+
+
+```
+
+
+### Read and integrate the drug dosage
+```{r}
+VERSION="paper20231025"
+BATCHID="CPH.20211217"
+DATAPATH=paste0("/home/kenneth/data/metabolic/ver20220920/")
+OUTPATH=paste0("/home/kenneth/out/metabolic/", BATCHID, "/", VERSION, "/phenotype/")
+
+# Conversion between injection and oral dose.
+inject.to.oral.dose <- list("OLANZAPINE"=c("0"=0, "10"=10),
+                       "RISPERIDONE"=c("0"=0, "5"=4 ,"25"=2, "50"=5),
+                       "ARIPIPRAZOLE"=c("0"=0, "300"=10,  "400"=10),
+                       "PALIPERIDONE"=c("0"=0, "525"=9, "150"=9, "100"=6, "75"=3, "50"=3))
+
+conv_dose <- function(dose, lookup_dose) {
+  lookup_dose[[as.character(dose)]]
+}
+
+# Conversion from injection dose to oral dose
+# Refer to conversion table in https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9645288/
+injectToOralDosage <- function (obs_inject_sga, df_dose, lookup_dose, oral_col_prefix) {
+
+  out <- list()
+  for (sga in obs_inject_sga) {
+    oral_col <- paste0(oral_col_prefix, sga)
+    inject_col <- paste0(injectable_sga_col_prefix, sga)
+    
+    inject_dose <- sapply(df_dose[[inject_col]], conv_dose, lookup_dose[[sga]])
+    ttl_dose <- df_dose[[oral_col]] + inject_dose
+    
+    out <- append(out, list(ttl_dose))
+  }
+  names(out) <- obs_inject_sga
+  return(out)
+}
+
+
+# Define the columns to be included in final output dataset
+col_prefix <- "daily_dose_before.21_days.oral_."
+injectable_sga_col_prefix <- "daily_dose_before.21_days.injection_."
+
+oral_cols <- paste0(col_prefix, ALL_drugs)
+inject_cols <- paste0(injectable_sga_col_prefix, injectable_sga)
+
+traits <- c("BL", "BGF", "BMI")
+
+# Read the dosage dataset
+df.dose.list <- list()
+for(t in traits){
+  df.dose.list[[t]] <- read.csv(paste0(DATAPATH, "medication_dose_calculated_", t ,".csv"))
+  
+  # Injection dose convert to oral dose
+  inject_col_idx <- match(inject_cols, colnames(df.dose.list[[t]]))
+  obs_inject_sga <- injectable_sga[!is.na(inject_col_idx)]
+  
+  list.ttl_dose <- injectToOralDosage(obs_inject_sga, 
+                                      df.dose.list[[t]], 
+                                      inject.to.oral.dose, 
+                                      col_prefix)
+  
+  # Replace the oral dose by total dose (oral + injection)
+  for (sga in names(list.ttl_dose)) {
+    dose_col <- paste0(col_prefix, sga)
+    df.dose.list[[t]][[dose_col]] <- list.ttl_dose[[sga]]
+  }
+  
+  # Select the dose columns
+
+  select_cols <- c("ID", "Date_measurement", paste0(col_prefix, ALL_drugs))
+  drug_idx <- match(select_cols, colnames(df.dose.list[[t]]))
+  drug_idx <- drug_idx[!is.na(drug_idx)]
+  
+  # Remove the drugs without prescription records in those patients
+  df.dose.list[[t]] <- df.dose.list[[t]][,drug_idx]
+
+  # Rename the columns
+  new_col_prefix <- "dose."
+  colnames(df.dose.list[[t]]) <- sub(col_prefix, new_col_prefix, colnames(df.dose.list[[t]]))
+  colnames(df.dose.list[[t]])[2] <- "Test_Date"
+
+  # Convert the date format
+  df.dose.list[[t]]$Test_Date <- as.Date(df.dose.list[[t]]$Test_Date, "%Y-%m-%d")
+}
+```
+
+
+### Generate the final dataset suitable for building the linear mixed effect model
+```{r, results='hide', message=FALSE}
+library(data.table)
+
+windowSize = 21
+
+# Extract all drug names
+drugNames <- unique(df.dose$drug_str1)
+
+# Define the extract field idx
+indexes <- list(BL=c(1:3,11:13,5:10,14:567),
+                BGF=c(1:3,8:10,5:7,11:564),
+                BMI=c(1:3,8:10,5:7,11:564))
+
+# Populate the dataset for blood test related metabolic data
+for (t in traits){
+  ids = unique(clinics[[t]]$ID)
+  #for (i in ids[585:740]) {
+  #  print(i)
+  #  extractDose(i, windowSize, df.clinic.bt, df.dose, drugNames)
+  #}
+  list.df <- lapply(ids, extractDose, windowSize, clinics[[t]], df.dose, drugNames)
+  df.final <- rbindlist(list.df)
+  df.final <- subset(df.final, select=colnames(df.final)[indexes[[t]]])
+
+  # Convert the character to numeric type
+  df.final$Gender <- as.factor(df.final$Gender) # 1=Male, 2=Female
+  df.final$Patient_Type <- as.factor(df.final$Patient_Type)
+
+  # Merge with the calculated dosage
+  df.final.out <- merge(df.final, df.dose.list[[t]], 
+                           by=c("ID", "Test_Date"), all.x=TRUE)
+
+  # Set the dosage to 0 for the first measurement record
+  first_dose_idx <- match("dose.CLOZAPINE", colnames(df.final.out))
+  df.tmp <- df.final.out[,first_dose_idx:ncol(df.final.out)]
+  df.tmp[is.na(df.tmp)] <- 0
+  df.final.out[, first_dose_idx:ncol(df.final.out)] <- df.tmp
+  rm(df.tmp)
+
+  # Dis-aggregate time-covariates to between-subject (bz) and 
+  # within-subject (wz) covariates
+  t_covariates="tx_duration"
+  drugs_with_dose <- colnames(df.final.out)[first_dose_idx:ncol(df.final.out)]
+  wb_drugs <- unique(c("sga", "fga", ALL_drugs, drugs_with_dose))
+  df.out <- add_bz_wz_cols(wb_drugs, t_covariates, df.final.out)
+  
+  # Output the pre-processed dataset to file
+  write.table(df.out, col.names=TRUE, row.names=FALSE, quote=FALSE, sep=",",
+              file=paste0(OUTPATH, "metabolic_with_total_dose_", 
+                          windowSize, "days.", t, ".csv"))
+}
+
+
+```
